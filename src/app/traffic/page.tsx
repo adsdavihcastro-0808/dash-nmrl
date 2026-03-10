@@ -7,7 +7,7 @@ import {
 } from "recharts";
 
 /* ── types ── */
-type DayRow = { date_start: string; total_conversions: number; avg_cpa: number };
+type DayRow = { day: string; total_conversions: number; avg_cpa: number };
 type CampaignRow = {
     campaign_name: string;
     total_spend: number;
@@ -21,6 +21,7 @@ type CampaignRow = {
 type KpiData = {
     avg_ctr: number; avg_cpc: number; avg_cpm: number;
     total_spend: number; total_impressions: number;
+    total_clicks: number; total_conversions: number;
 };
 
 const PERIODS = ["7d", "30d", "90d"];
@@ -36,6 +37,9 @@ function formatNum(v: number) {
 function periodToDays(p: string) {
     return p === "7d" ? 7 : p === "30d" ? 30 : 90;
 }
+function dateSince(days: number) {
+    return new Date(Date.now() - days * 86400000).toISOString().split("T")[0];
+}
 
 export default function TrafficPage() {
     const [period, setPeriod] = useState("30d");
@@ -48,93 +52,76 @@ export default function TrafficPage() {
     useEffect(() => {
         setLoading(true);
         const days = periodToDays(period);
-        const prev = days * 2;
+        const since = dateSince(days);
+        const prevSince = dateSince(days * 2);
 
-        const kpiQuery = supabase
-            .from("facebook_ads_insights")
-            .select("spend, impressions, clicks, ctr, cpc, cpm, conversions")
-            .gte("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0]);
+        // KPIs — current period
+        const kpiPromise = supabase
+            .rpc("get_traffic_kpis", { p_since: since })
+            .single()
+            .then(({ data, error }) => {
+                if (error) console.error("KPI error:", error);
+                if (data) setKpis(data as KpiData);
+            });
 
-        const prevQuery = supabase
-            .from("facebook_ads_insights")
-            .select("spend, impressions, clicks, ctr, cpc, cpm, conversions")
-            .gte("date_start", new Date(Date.now() - prev * 86400000).toISOString().split("T")[0])
-            .lt("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0]);
+        // KPIs — previous period (for trend comparison)
+        const prevPromise = supabase
+            .rpc("get_traffic_kpis", { p_since: prevSince, p_until: since })
+            .single()
+            .then(({ data, error }) => {
+                if (error) console.error("Prev KPI error:", error);
+                if (data) setPrevKpis(data as KpiData);
+            });
 
-        Promise.all([kpiQuery, prevQuery]).then(([cur, prv]) => {
-            const agg = (rows: typeof cur.data) => {
-                if (!rows?.length) return { avg_ctr: 0, avg_cpc: 0, avg_cpm: 0, total_spend: 0, total_impressions: 0 };
-                return {
-                    avg_ctr: rows.reduce((s, r) => s + Number(r.ctr), 0) / rows.length,
-                    avg_cpc: rows.reduce((s, r) => s + Number(r.cpc), 0) / rows.length,
-                    avg_cpm: rows.reduce((s, r) => s + Number(r.cpm), 0) / rows.length,
-                    total_spend: rows.reduce((s, r) => s + Number(r.spend), 0),
-                    total_impressions: rows.reduce((s, r) => s + Number(r.impressions), 0),
-                };
-            };
-            setKpis(agg(cur.data));
-            setPrevKpis(agg(prv.data));
+        // Chart — daily conversions + CPA
+        const chartPromise = supabase
+            .rpc("get_traffic_chart", { p_since: since })
+            .then(({ data, error }) => {
+                if (error) console.error("Chart error:", error);
+                setChart(
+                    (data ?? []).map((r: DayRow) => ({
+                        day: String(r.day).slice(5), // MM-DD
+                        total_conversions: Number(r.total_conversions),
+                        avg_cpa: Number(r.avg_cpa),
+                    }))
+                );
+            });
+
+        // Campaign table
+        const campPromise = supabase
+            .rpc("get_traffic_campaigns", { p_since: since, p_limit: 10 })
+            .then(({ data, error }) => {
+                if (error) console.error("Campaigns error:", error);
+                setCampaigns(
+                    (data ?? []).map((r: CampaignRow) => ({
+                        campaign_name: r.campaign_name,
+                        total_spend: Number(r.total_spend),
+                        total_impressions: Number(r.total_impressions),
+                        total_clicks: Number(r.total_clicks),
+                        total_reach: Number(r.total_reach),
+                        total_conversions: Number(r.total_conversions),
+                        avg_ctr: Number(r.avg_ctr),
+                        avg_cpc: Number(r.avg_cpc),
+                    }))
+                );
+            });
+
+        Promise.all([kpiPromise, prevPromise, chartPromise, campPromise]).then(() => {
             setLoading(false);
         });
-
-        // Chart — daily conversions + avg CPA
-        supabase
-            .from("facebook_ads_insights")
-            .select("date_start, conversions, cost_per_conversion")
-            .gte("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0])
-            .order("date_start", { ascending: true })
-            .then(({ data }) => {
-                const byDay = new Map<string, { conv: number; cpa_sum: number; count: number }>();
-                data?.forEach(r => {
-                    const d = r.date_start;
-                    const cur = byDay.get(d) ?? { conv: 0, cpa_sum: 0, count: 0 };
-                    byDay.set(d, { conv: cur.conv + Number(r.conversions), cpa_sum: cur.cpa_sum + Number(r.cost_per_conversion), count: cur.count + 1 });
-                });
-                setChart(Array.from(byDay.entries()).map(([date_start, v]) => ({
-                    date_start: date_start.slice(5), // MM-DD
-                    total_conversions: v.conv,
-                    avg_cpa: v.count ? v.cpa_sum / v.count : 0,
-                })));
-            });
-
-
-        supabase
-            .from("facebook_ads_insights")
-            .select("campaign_name, spend, impressions, clicks, reach, conversions, ctr, cpc")
-            .gte("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0])
-            .then(({ data }) => {
-                const map = new Map<string, CampaignRow>();
-                data?.forEach(r => {
-                    const cur = map.get(r.campaign_name) ?? { campaign_name: r.campaign_name, total_spend: 0, total_impressions: 0, total_clicks: 0, total_reach: 0, total_conversions: 0, avg_ctr: 0, avg_cpc: 0 };
-                    map.set(r.campaign_name, {
-                        ...cur,
-                        total_spend: cur.total_spend + Number(r.spend),
-                        total_impressions: cur.total_impressions + Number(r.impressions),
-                        total_clicks: cur.total_clicks + Number(r.clicks),
-                        total_reach: cur.total_reach + Number(r.reach),
-                        total_conversions: cur.total_conversions + Number(r.conversions),
-                        avg_ctr: cur.avg_ctr + Number(r.ctr),
-                        avg_cpc: cur.avg_cpc + Number(r.cpc),
-                    });
-                });
-                const arr = Array.from(map.values())
-                    .map(c => ({ ...c, avg_ctr: c.avg_ctr, avg_cpc: c.avg_cpc }))
-                    .sort((a, b) => b.total_spend - a.total_spend)
-                    .slice(0, 10);
-                setCampaigns(arr);
-            });
     }, [period]);
 
-    function trend(cur: number, prev: number) {
+    function trend(cur: number, prev: number, lowerIsBetter = false) {
         if (!prev) return { pct: "—", up: true };
         const d = ((cur - prev) / prev) * 100;
-        return { pct: `${d > 0 ? "+" : ""}${d.toFixed(1)}%`, up: d >= 0 };
+        const up = lowerIsBetter ? d <= 0 : d >= 0;
+        return { pct: `${d > 0 ? "+" : ""}${d.toFixed(1)}%`, up };
     }
 
     const kpiCards = kpis ? [
         { label: "CTR Médio", value: `${kpis.avg_ctr.toFixed(2)}%`, icon: "ads_click", t: trend(kpis.avg_ctr, prevKpis?.avg_ctr ?? 0) },
-        { label: "CPC Médio", value: formatCurrency(kpis.avg_cpc), icon: "payments", t: trend(-kpis.avg_cpc, -(prevKpis?.avg_cpc ?? 0)) },
-        { label: "CPM Médio", value: formatCurrency(kpis.avg_cpm), icon: "visibility", t: trend(-kpis.avg_cpm, -(prevKpis?.avg_cpm ?? 0)) },
+        { label: "CPC Médio", value: formatCurrency(kpis.avg_cpc), icon: "payments", t: trend(kpis.avg_cpc, prevKpis?.avg_cpc ?? 0, true) },
+        { label: "CPM Médio", value: formatCurrency(kpis.avg_cpm), icon: "visibility", t: trend(kpis.avg_cpm, prevKpis?.avg_cpm ?? 0, true) },
         { label: "Gasto Total", value: formatCurrency(kpis.total_spend), icon: "account_balance_wallet", t: trend(kpis.total_spend, prevKpis?.total_spend ?? 0) },
         { label: "Impressões", value: formatNum(kpis.total_impressions), icon: "groups", t: trend(kpis.total_impressions, prevKpis?.total_impressions ?? 0) },
     ] : [];
@@ -212,7 +199,7 @@ export default function TrafficPage() {
                                 </linearGradient>
                             </defs>
                             <CartesianGrid strokeDasharray="4" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                            <XAxis dataKey="date_start" axisLine={false} tickLine={false} tick={{ fill: "#64748b", fontSize: 10, fontWeight: 700 }} dy={8} />
+                            <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{ fill: "#64748b", fontSize: 10, fontWeight: 700 }} dy={8} />
                             <YAxis axisLine={false} tickLine={false} tick={{ fill: "#64748b", fontSize: 10 }} />
                             <Tooltip
                                 contentStyle={{ background: "rgba(10,9,20,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
@@ -251,7 +238,6 @@ export default function TrafficPage() {
                                     </tr>
                                 ))
                                 : campaigns.map((c, i) => {
-                                    // Clean campaign name — remove tag brackets
                                     const name = c.campaign_name.replace(/\[[^\]]+\]/g, "").trim() || c.campaign_name;
                                     return (
                                         <tr key={i} className="transition-colors"
@@ -266,8 +252,8 @@ export default function TrafficPage() {
                                             <td className="px-5 py-4 text-xs text-slate-300 text-right">{formatNum(c.total_reach)}</td>
                                             <td className="px-5 py-4 text-xs text-slate-300 text-right">{formatNum(c.total_clicks)}</td>
                                             <td className="px-5 py-4 text-xs font-bold text-slate-100 text-right">{c.total_conversions}</td>
-                                            <td className="px-5 py-4 text-xs text-right" style={{ color: "#C2DF0C" }}>{(c.avg_ctr / Math.max(1, i + 1)).toFixed(2)}%</td>
-                                            <td className="px-5 py-4 text-xs text-slate-300 text-right">{formatCurrency(c.avg_cpc / Math.max(1, i + 1))}</td>
+                                            <td className="px-5 py-4 text-xs text-right" style={{ color: "#C2DF0C" }}>{c.avg_ctr.toFixed(2)}%</td>
+                                            <td className="px-5 py-4 text-xs text-slate-300 text-right">{formatCurrency(c.avg_cpc)}</td>
                                             <td className="px-5 py-4 text-xs font-bold text-white text-right">{formatCurrency(c.total_spend)}</td>
                                         </tr>
                                     );
