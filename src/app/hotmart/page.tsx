@@ -206,7 +206,7 @@ export default function HotmartPage() {
                                 <YAxis axisLine={false} tickLine={false} tick={{ fill: "#475569", fontSize: 10 }} tickFormatter={v => `R$${(v / 1000).toFixed(0)}K`} />
                                 <Tooltip
                                     contentStyle={{ background: "rgba(10,9,20,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
-                                    formatter={(v: number | string | undefined) => [typeof v === "number" ? formatCurrency(v) : v, "Receita"]}
+                                    formatter={(v: unknown) => [typeof v === "number" ? formatCurrency(v) : String(v ?? ""), "Receita"] as [string, string]}
                                     labelStyle={{ color: "#94a3b8" }}
                                 />
                                 <Area type="monotone" dataKey="vendas" name="Receita" strokeWidth={3} stroke="#C2DF0C" fill="url(#gradLime)" />
