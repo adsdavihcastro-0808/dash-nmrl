@@ -30,14 +30,7 @@ export function Header() {
             </div>
 
             <div className="flex items-center gap-4">
-                {/* Date filter for traffic */}
-                {pathname.startsWith("/traffic") && (
-                    <div className="flex items-center gap-1 p-1 rounded-lg" style={{ background: "rgba(23,6,157,0.15)" }}>
-                        {["Hoje", "7d", "30d"].map(f => (
-                            <button key={f} className="px-3 py-1 text-xs font-semibold rounded-md text-slate-400 hover:text-white transition-all hover:bg-white/5">{f}</button>
-                        ))}
-                    </div>
-                )}
+
 
                 {/* Bell */}
                 <button className="relative size-9 flex items-center justify-center rounded-full transition-colors" style={{ background: "rgba(23,6,157,0.15)" }}>
