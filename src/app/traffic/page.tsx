@@ -1,77 +1,176 @@
 "use client";
 
+import { useEffect, useState } from "react";
+import { supabase } from "@/lib/supabase";
 import {
-    AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Line, LineChart
+    AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Line
 } from "recharts";
 
-const chartData = [
-    { day: "Seg", conv: 42, cpa: 38 },
-    { day: "Ter", conv: 68, cpa: 32 },
-    { day: "Qua", conv: 54, cpa: 36 },
-    { day: "Qui", conv: 91, cpa: 28 },
-    { day: "Sex", conv: 75, cpa: 30 },
-    { day: "Sáb", conv: 112, cpa: 22 },
-    { day: "Dom", conv: 89, cpa: 25 },
-];
+/* ── types ── */
+type DayRow = { date_start: string; total_conversions: number; avg_cpa: number };
+type CampaignRow = {
+    campaign_name: string;
+    total_spend: number;
+    total_impressions: number;
+    total_clicks: number;
+    total_reach: number;
+    total_conversions: number;
+    avg_ctr: number;
+    avg_cpc: number;
+};
+type KpiData = {
+    avg_ctr: number; avg_cpc: number; avg_cpm: number;
+    total_spend: number; total_impressions: number;
+};
 
-const campaigns = [
-    {
-        status: "ativo",
-        name: "[Vendas] Lançamento Março 2024",
-        objective: "Conversão",
-        reach: "452.109",
-        clicks: "12.402",
-        conv: "842",
-        cost: "R$ 5.420,00",
-    },
-    {
-        status: "ativo",
-        name: "[Remarketing] Carrinho Abandonado",
-        objective: "Vendas",
-        reach: "12.504",
-        clicks: "3.120",
-        conv: "245",
-        cost: "R$ 1.150,00",
-    },
-    {
-        status: "pausado",
-        name: "[Topo] Engajamento Vídeo 01",
-        objective: "Visualização",
-        reach: "842.001",
-        clicks: "45.102",
-        conv: "--",
-        cost: "R$ 3.840,00",
-    },
-];
+const PERIODS = ["7d", "30d", "90d"];
 
-const kpis = [
-    { label: "CTR Médio", value: "2.45%", icon: "ads_click", trendUp: true, trend: "+12.4%" },
-    { label: "CPC Médio", value: "R$ 0.45", icon: "payments", trendUp: true, trend: "-5.2%" },
-    { label: "CPM Médio", value: "R$ 12.50", icon: "visibility", trendUp: false, trend: "-2.1%" },
-    { label: "Gasto Total", value: "R$ 15.2k", icon: "account_balance_wallet", trendUp: false, trend: "+8.5%" },
-    { label: "Impressões", value: "1.2M", icon: "groups", trendUp: true, trend: "+15.3%" },
-];
+function formatCurrency(v: number) {
+    return `R$ ${v.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+function formatNum(v: number) {
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${(v / 1_000).toFixed(1)}K`;
+    return String(Math.round(v));
+}
+function periodToDays(p: string) {
+    return p === "7d" ? 7 : p === "30d" ? 30 : 90;
+}
 
 export default function TrafficPage() {
+    const [period, setPeriod] = useState("30d");
+    const [kpis, setKpis] = useState<KpiData | null>(null);
+    const [prevKpis, setPrevKpis] = useState<KpiData | null>(null);
+    const [chart, setChart] = useState<DayRow[]>([]);
+    const [campaigns, setCampaigns] = useState<CampaignRow[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        setLoading(true);
+        const days = periodToDays(period);
+        const prev = days * 2;
+
+        const kpiQuery = supabase
+            .from("facebook_ads_insights")
+            .select("spend, impressions, clicks, ctr, cpc, cpm, conversions")
+            .gte("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0]);
+
+        const prevQuery = supabase
+            .from("facebook_ads_insights")
+            .select("spend, impressions, clicks, ctr, cpc, cpm, conversions")
+            .gte("date_start", new Date(Date.now() - prev * 86400000).toISOString().split("T")[0])
+            .lt("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0]);
+
+        Promise.all([kpiQuery, prevQuery]).then(([cur, prv]) => {
+            const agg = (rows: typeof cur.data) => {
+                if (!rows?.length) return { avg_ctr: 0, avg_cpc: 0, avg_cpm: 0, total_spend: 0, total_impressions: 0 };
+                return {
+                    avg_ctr: rows.reduce((s, r) => s + Number(r.ctr), 0) / rows.length,
+                    avg_cpc: rows.reduce((s, r) => s + Number(r.cpc), 0) / rows.length,
+                    avg_cpm: rows.reduce((s, r) => s + Number(r.cpm), 0) / rows.length,
+                    total_spend: rows.reduce((s, r) => s + Number(r.spend), 0),
+                    total_impressions: rows.reduce((s, r) => s + Number(r.impressions), 0),
+                };
+            };
+            setKpis(agg(cur.data));
+            setPrevKpis(agg(prv.data));
+            setLoading(false);
+        });
+
+        // Chart — daily conversions + avg CPA
+        supabase
+            .from("facebook_ads_insights")
+            .select("date_start, conversions, cost_per_conversion")
+            .gte("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0])
+            .order("date_start", { ascending: true })
+            .then(({ data }) => {
+                const byDay = new Map<string, { conv: number; cpa_sum: number; count: number }>();
+                data?.forEach(r => {
+                    const d = r.date_start;
+                    const cur = byDay.get(d) ?? { conv: 0, cpa_sum: 0, count: 0 };
+                    byDay.set(d, { conv: cur.conv + Number(r.conversions), cpa_sum: cur.cpa_sum + Number(r.cost_per_conversion), count: cur.count + 1 });
+                });
+                setChart(Array.from(byDay.entries()).map(([date_start, v]) => ({
+                    date_start: date_start.slice(5), // MM-DD
+                    total_conversions: v.conv,
+                    avg_cpa: v.count ? v.cpa_sum / v.count : 0,
+                })));
+            });
+
+        // Campaigns table
+        supabase.rpc
+            ? null
+            : null;
+        supabase
+            .from("facebook_ads_insights")
+            .select("campaign_name, spend, impressions, clicks, reach, conversions, ctr, cpc")
+            .gte("date_start", new Date(Date.now() - days * 86400000).toISOString().split("T")[0])
+            .then(({ data }) => {
+                const map = new Map<string, CampaignRow>();
+                data?.forEach(r => {
+                    const cur = map.get(r.campaign_name) ?? { campaign_name: r.campaign_name, total_spend: 0, total_impressions: 0, total_clicks: 0, total_reach: 0, total_conversions: 0, avg_ctr: 0, avg_cpc: 0 };
+                    map.set(r.campaign_name, {
+                        ...cur,
+                        total_spend: cur.total_spend + Number(r.spend),
+                        total_impressions: cur.total_impressions + Number(r.impressions),
+                        total_clicks: cur.total_clicks + Number(r.clicks),
+                        total_reach: cur.total_reach + Number(r.reach),
+                        total_conversions: cur.total_conversions + Number(r.conversions),
+                        avg_ctr: cur.avg_ctr + Number(r.ctr),
+                        avg_cpc: cur.avg_cpc + Number(r.cpc),
+                    });
+                });
+                const arr = Array.from(map.values())
+                    .map(c => ({ ...c, avg_ctr: c.avg_ctr, avg_cpc: c.avg_cpc }))
+                    .sort((a, b) => b.total_spend - a.total_spend)
+                    .slice(0, 10);
+                setCampaigns(arr);
+            });
+    }, [period]);
+
+    function trend(cur: number, prev: number) {
+        if (!prev) return { pct: "—", up: true };
+        const d = ((cur - prev) / prev) * 100;
+        return { pct: `${d > 0 ? "+" : ""}${d.toFixed(1)}%`, up: d >= 0 };
+    }
+
+    const kpiCards = kpis ? [
+        { label: "CTR Médio", value: `${kpis.avg_ctr.toFixed(2)}%`, icon: "ads_click", t: trend(kpis.avg_ctr, prevKpis?.avg_ctr ?? 0) },
+        { label: "CPC Médio", value: formatCurrency(kpis.avg_cpc), icon: "payments", t: trend(-kpis.avg_cpc, -(prevKpis?.avg_cpc ?? 0)) },
+        { label: "CPM Médio", value: formatCurrency(kpis.avg_cpm), icon: "visibility", t: trend(-kpis.avg_cpm, -(prevKpis?.avg_cpm ?? 0)) },
+        { label: "Gasto Total", value: formatCurrency(kpis.total_spend), icon: "account_balance_wallet", t: trend(kpis.total_spend, prevKpis?.total_spend ?? 0) },
+        { label: "Impressões", value: formatNum(kpis.total_impressions), icon: "groups", t: trend(kpis.total_impressions, prevKpis?.total_impressions ?? 0) },
+    ] : [];
+
     return (
         <div className="p-8 space-y-8">
             {/* KPI Cards */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-                {kpis.map((kpi) => (
-                    <div key={kpi.label} className="glass-card rounded-xl p-5 relative overflow-hidden group">
-                        <div className="absolute -right-2 -top-2 opacity-5 transition-transform group-hover:scale-110" style={{ color: "#C2DF0C" }}>
-                            <span className="material-symbols-outlined" style={{ fontSize: "5rem" }}>{kpi.icon}</span>
+                {loading
+                    ? Array.from({ length: 5 }).map((_, i) => (
+                        <div key={i} className="glass-card rounded-xl p-5 animate-pulse">
+                            <div className="h-3 w-20 rounded mb-3" style={{ background: "rgba(255,255,255,0.06)" }}></div>
+                            <div className="h-8 w-28 rounded mb-2" style={{ background: "rgba(255,255,255,0.06)" }}></div>
+                            <div className="h-3 w-12 rounded" style={{ background: "rgba(255,255,255,0.04)" }}></div>
                         </div>
-                        <p className="text-xs font-medium text-slate-400 uppercase tracking-widest mb-1">{kpi.label}</p>
-                        <h3 className="text-3xl font-extrabold text-white">{kpi.value}</h3>
-                        <div className="mt-2 flex items-center gap-1.5">
-                            <span className="material-symbols-outlined text-lg" style={{ color: kpi.trendUp ? "#C2DF0C" : "#ef4444" }}>
-                                {kpi.trendUp ? "trending_up" : "trending_down"}
-                            </span>
-                            <span className="text-xs font-bold" style={{ color: kpi.trendUp ? "#C2DF0C" : "#ef4444" }}>{kpi.trend}</span>
+                    ))
+                    : kpiCards.map((kpi) => (
+                        <div key={kpi.label} className="glass-card rounded-xl p-5 relative overflow-hidden group">
+                            <div className="absolute -right-2 -top-2 opacity-5 group-hover:opacity-10 transition-opacity">
+                                <span className="material-symbols-outlined" style={{ fontSize: "5rem" }}>{kpi.icon}</span>
+                            </div>
+                            <p className="text-xs font-medium text-slate-400 uppercase tracking-widest mb-1">{kpi.label}</p>
+                            <h3 className="text-2xl font-extrabold text-white">{kpi.value}</h3>
+                            <div className="mt-2 flex items-center gap-1.5">
+                                <span className="material-symbols-outlined text-lg" style={{ color: kpi.t.up ? "#C2DF0C" : "#ef4444" }}>
+                                    {kpi.t.up ? "trending_up" : "trending_down"}
+                                </span>
+                                <span className="text-xs font-bold" style={{ color: kpi.t.up ? "#C2DF0C" : "#ef4444" }}>{kpi.t.pct}</span>
+                                <span className="text-[10px] text-slate-600">vs período anterior</span>
+                            </div>
                         </div>
-                    </div>
-                ))}
+                    ))
+                }
             </div>
 
             {/* Chart */}
@@ -79,22 +178,36 @@ export default function TrafficPage() {
                 <div className="flex items-center justify-between mb-6">
                     <div>
                         <h4 className="text-lg font-bold text-white">Performance de Conversão</h4>
-                        <p className="text-xs text-slate-500">Acompanhamento diário de Conversões vs. CPA</p>
+                        <p className="text-xs text-slate-500">Conversões diárias vs. Custo por Conversão</p>
                     </div>
-                    <div className="flex items-center gap-6">
-                        <div className="flex items-center gap-2">
-                            <span className="size-3 rounded-full inline-block" style={{ background: "#17069d" }}></span>
-                            <span className="text-xs font-medium text-slate-400">Conversões</span>
+                    <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-4 mr-4">
+                            <div className="flex items-center gap-2">
+                                <span className="size-3 rounded-full inline-block" style={{ background: "#17069d" }}></span>
+                                <span className="text-xs text-slate-400">Conversões</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <span className="size-3 rounded-full inline-block" style={{ background: "#C2DF0C" }}></span>
+                                <span className="text-xs text-slate-400">CPA</span>
+                            </div>
                         </div>
-                        <div className="flex items-center gap-2">
-                            <span className="size-3 rounded-full inline-block" style={{ background: "#C2DF0C" }}></span>
-                            <span className="text-xs font-medium text-slate-400">Custo por Conv.</span>
+                        <div className="flex items-center gap-1 p-1 rounded-lg" style={{ background: "rgba(23,6,157,0.15)" }}>
+                            {PERIODS.map(p => (
+                                <button key={p}
+                                    onClick={() => setPeriod(p)}
+                                    className="px-3 py-1 text-xs font-bold rounded-md transition-all"
+                                    style={period === p
+                                        ? { background: "#17069d", color: "#fff" }
+                                        : { color: "#64748b", background: "transparent" }
+                                    }
+                                >{p}</button>
+                            ))}
                         </div>
                     </div>
                 </div>
                 <div className="h-64">
                     <ResponsiveContainer width="100%" height="100%">
-                        <AreaChart data={chartData} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
+                        <AreaChart data={chart} margin={{ top: 5, right: 10, left: -20, bottom: 0 }}>
                             <defs>
                                 <linearGradient id="gradPrimary" x1="0" y1="0" x2="0" y2="1">
                                     <stop offset="0%" stopColor="#17069d" stopOpacity={0.4} />
@@ -102,15 +215,15 @@ export default function TrafficPage() {
                                 </linearGradient>
                             </defs>
                             <CartesianGrid strokeDasharray="4" vertical={false} stroke="rgba(255,255,255,0.05)" />
-                            <XAxis dataKey="day" axisLine={false} tickLine={false} tick={{ fill: "#64748b", fontSize: 11, fontWeight: 700 }} dy={8} />
-                            <YAxis axisLine={false} tickLine={false} tick={{ fill: "#64748b", fontSize: 11 }} />
+                            <XAxis dataKey="date_start" axisLine={false} tickLine={false} tick={{ fill: "#64748b", fontSize: 10, fontWeight: 700 }} dy={8} />
+                            <YAxis axisLine={false} tickLine={false} tick={{ fill: "#64748b", fontSize: 10 }} />
                             <Tooltip
                                 contentStyle={{ background: "rgba(10,9,20,0.95)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
                                 labelStyle={{ color: "#94a3b8" }}
                                 itemStyle={{ color: "#f1f5f9" }}
                             />
-                            <Area type="monotone" dataKey="conv" strokeWidth={3} stroke="#17069d" fill="url(#gradPrimary)" name="Conversões" />
-                            <Line type="monotone" dataKey="cpa" strokeWidth={2.5} stroke="#C2DF0C" strokeDasharray="8 4" dot={false} name="Custo/Conv." />
+                            <Area type="monotone" dataKey="total_conversions" name="Conversões" strokeWidth={3} stroke="#17069d" fill="url(#gradPrimary)" />
+                            <Line type="monotone" dataKey="avg_cpa" name="CPA médio (R$)" strokeWidth={2.5} stroke="#C2DF0C" strokeDasharray="8 4" dot={false} />
                         </AreaChart>
                     </ResponsiveContainer>
                 </div>
@@ -120,76 +233,55 @@ export default function TrafficPage() {
             <div className="glass-card rounded-xl overflow-hidden">
                 <div className="p-6 flex items-center justify-between" style={{ borderBottom: "1px solid rgba(255,255,255,0.07)" }}>
                     <h4 className="text-lg font-bold text-white">Relatório de Campanhas</h4>
-                    <div className="flex items-center gap-2">
-                        <div className="relative">
-                            <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" style={{ fontSize: 16 }}>search</span>
-                            <input
-                                type="text"
-                                placeholder="Filtrar campanhas..."
-                                className="pl-9 pr-4 py-2 rounded-lg text-xs text-slate-300 placeholder-slate-600 outline-none"
-                                style={{ background: "rgba(23,6,157,0.12)", border: "none", width: 220 }}
-                            />
-                        </div>
-                        <button className="flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-bold" style={{ background: "#C2DF0C", color: "#0A0914" }}>
-                            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>download</span>
-                            Exportar CSV
-                        </button>
-                    </div>
+                    <span className="text-xs text-slate-500">Top 10 por gasto • {period}</span>
                 </div>
-
                 <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
                         <thead>
                             <tr style={{ background: "rgba(23,6,157,0.07)" }}>
-                                {["Status", "Campanha", "Alcance", "Cliques", "Conv.", "Custo", "Ações"].map((h, i) => (
-                                    <th key={h} className={`px-6 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest ${i > 1 ? "text-right" : ""}`}>{h}</th>
+                                {["Campanha", "Alcance", "Cliques", "Conv.", "CTR", "CPC", "Gasto"].map((h, i) => (
+                                    <th key={h} className={`px-5 py-4 text-[10px] font-bold text-slate-500 uppercase tracking-widest ${i > 0 ? "text-right" : ""}`}>{h}</th>
                                 ))}
                             </tr>
                         </thead>
-                        <tbody style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
-                            {campaigns.map((c, i) => (
-                                <tr key={i} className="transition-colors" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}
-                                    onMouseEnter={e => (e.currentTarget.style.background = "rgba(23,6,157,0.07)")}
-                                    onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
-                                >
-                                    <td className="px-6 py-4">
-                                        <span className={c.status === "ativo" ? "badge-active" : "badge-paused"}>
-                                            <span className="size-1.5 rounded-full inline-block animate-pulse-dot" style={{ background: c.status === "ativo" ? "#C2DF0C" : "#64748b" }}></span>
-                                            {c.status.toUpperCase()}
-                                        </span>
-                                    </td>
-                                    <td className="px-6 py-4">
-                                        <p className="text-sm font-bold text-slate-100 max-w-[200px] truncate">{c.name}</p>
-                                        <p className="text-[10px] text-slate-500">Objetivo: {c.objective}</p>
-                                    </td>
-                                    <td className="px-6 py-4 text-sm text-slate-300 text-right">{c.reach}</td>
-                                    <td className="px-6 py-4 text-sm text-slate-300 text-right">{c.clicks}</td>
-                                    <td className="px-6 py-4 text-sm font-bold text-slate-100 text-right">{c.conv}</td>
-                                    <td className="px-6 py-4 text-sm font-bold text-slate-100 text-right">{c.cost}</td>
-                                    <td className="px-6 py-4 text-right">
-                                        <button className="text-slate-500 hover:text-slate-200 transition-colors">
-                                            <span className="material-symbols-outlined text-xl">open_in_new</span>
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
+                        <tbody>
+                            {loading
+                                ? Array.from({ length: 5 }).map((_, i) => (
+                                    <tr key={i} style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}>
+                                        <td className="px-5 py-4" colSpan={7}>
+                                            <div className="h-4 rounded animate-pulse" style={{ background: "rgba(255,255,255,0.05)" }}></div>
+                                        </td>
+                                    </tr>
+                                ))
+                                : campaigns.map((c, i) => {
+                                    // Clean campaign name — remove tag brackets
+                                    const name = c.campaign_name.replace(/\[[^\]]+\]/g, "").trim() || c.campaign_name;
+                                    return (
+                                        <tr key={i} className="transition-colors"
+                                            style={{ borderTop: "1px solid rgba(255,255,255,0.04)" }}
+                                            onMouseEnter={e => (e.currentTarget.style.background = "rgba(23,6,157,0.07)")}
+                                            onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                                        >
+                                            <td className="px-5 py-4 max-w-[220px]">
+                                                <p className="font-bold text-slate-100 text-xs truncate" title={c.campaign_name}>{name}</p>
+                                                <p className="text-[10px] text-slate-500 mt-0.5">{formatNum(c.total_impressions)} impressões</p>
+                                            </td>
+                                            <td className="px-5 py-4 text-xs text-slate-300 text-right">{formatNum(c.total_reach)}</td>
+                                            <td className="px-5 py-4 text-xs text-slate-300 text-right">{formatNum(c.total_clicks)}</td>
+                                            <td className="px-5 py-4 text-xs font-bold text-slate-100 text-right">{c.total_conversions}</td>
+                                            <td className="px-5 py-4 text-xs text-right" style={{ color: "#C2DF0C" }}>{(c.avg_ctr / Math.max(1, i + 1)).toFixed(2)}%</td>
+                                            <td className="px-5 py-4 text-xs text-slate-300 text-right">{formatCurrency(c.avg_cpc / Math.max(1, i + 1))}</td>
+                                            <td className="px-5 py-4 text-xs font-bold text-white text-right">{formatCurrency(c.total_spend)}</td>
+                                        </tr>
+                                    );
+                                })
+                            }
                         </tbody>
                     </table>
                 </div>
-
-                {/* Pagination */}
-                <div className="px-6 py-4 flex items-center justify-between" style={{ background: "rgba(23,6,157,0.05)" }}>
-                    <p className="text-xs text-slate-500">Exibindo 3 de 42 campanhas</p>
-                    <div className="flex gap-1">
-                        <button className="size-8 flex items-center justify-center rounded text-slate-400 hover:text-white transition-colors" style={{ border: "1px solid rgba(255,255,255,0.1)" }}>
-                            <span className="material-symbols-outlined text-sm">chevron_left</span>
-                        </button>
-                        <button className="size-8 flex items-center justify-center rounded text-xs font-bold text-white" style={{ background: "#17069d" }}>1</button>
-                        <button className="size-8 flex items-center justify-center rounded text-xs text-slate-400" style={{ border: "1px solid rgba(255,255,255,0.1)" }}>2</button>
-                        <button className="size-8 flex items-center justify-center rounded text-slate-400 hover:text-white transition-colors" style={{ border: "1px solid rgba(255,255,255,0.1)" }}>
-                            <span className="material-symbols-outlined text-sm">chevron_right</span>
-                        </button>
-                    </div>
+                <div className="px-6 py-3 flex justify-between items-center" style={{ background: "rgba(23,6,157,0.05)" }}>
+                    <p className="text-xs text-slate-500">Dados reais do período de <strong className="text-slate-300">{period}</strong></p>
+                    <span className="text-[10px] text-slate-600">via Supabase • facebook_ads_insights</span>
                 </div>
             </div>
         </div>
