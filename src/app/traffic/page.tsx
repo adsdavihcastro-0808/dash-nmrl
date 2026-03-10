@@ -97,10 +97,7 @@ export default function TrafficPage() {
                 })));
             });
 
-        // Campaigns table
-        supabase.rpc
-            ? null
-            : null;
+
         supabase
             .from("facebook_ads_insights")
             .select("campaign_name, spend, impressions, clicks, reach, conversions, ctr, cpc")
