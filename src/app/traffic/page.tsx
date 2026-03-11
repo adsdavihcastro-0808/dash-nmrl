@@ -325,7 +325,7 @@ export default function TrafficPage() {
                                     </tr>
                                 ))
                                 : campaigns.map((c, i) => {
-                                    const name = c.campaign_name.replace(/\[[^\]]+\]/g, "").trim() || c.campaign_name;
+                                    const name = c.campaign_name;
                                     const freqWarning = c.avg_frequency > 3;
                                     return (
                                         <tr key={i} className="transition-colors"
